@@ -1,4 +1,4 @@
-﻿' ShareRibbon\Services\EmbeddingService.vb
+' ShareRibbon\Services\EmbeddingService.vb
 ' Embedding 向量服务：调用 OpenAI Embedding API 生成文本向量
 Imports System.Diagnostics
 Imports System.Net
@@ -13,12 +13,34 @@ Imports Newtonsoft.Json.Linq
 ''' </summary>
 Public Class EmbeddingService
 
+    Private Shared ReadOnly _unsupportedProviders As String() = {"deepseek"}
+    Private Shared _lastFailureTime As DateTime? = Nothing
+    Private Shared ReadOnly _failureCooldown As TimeSpan = TimeSpan.FromMinutes(30)
+
     ''' <summary>
-    ''' 根据 API 端点获取默认的 Embedding 模型
+    ''' 检查当前配置是否支持 Embedding 生成
+    ''' </summary>
+    Public Shared Function IsEmbeddingAvailable() As Boolean
+        If String.IsNullOrWhiteSpace(ConfigSettings.ApiKey) Then Return False
+        If String.IsNullOrWhiteSpace(ConfigSettings.ApiUrl) Then Return False
+
+        If Not String.IsNullOrWhiteSpace(ConfigSettings.EmbeddingModel) Then Return True
+
+        Dim urlLower = ConfigSettings.ApiUrl.ToLowerInvariant()
+        For Each provider In _unsupportedProviders
+            If urlLower.Contains(provider) Then Return False
+        Next
+
+        Dim defaultModel = GetDefaultEmbeddingModel(ConfigSettings.ApiUrl)
+        Return Not String.IsNullOrWhiteSpace(defaultModel)
+    End Function
+
+    ''' <summary>
+    ''' 根据 API 端点获取默认的 Embedding 模型（仅对已知支持 embedding 的提供商返回模型名）
     ''' </summary>
     Private Shared Function GetDefaultEmbeddingModel(apiUrl As String) As String
         If String.IsNullOrWhiteSpace(apiUrl) Then
-            Return "text-embedding-3-small"
+            Return Nothing
         End If
 
         Dim urlLower = apiUrl.ToLowerInvariant()
@@ -48,18 +70,13 @@ Public Class EmbeddingService
             Return "embedding-v1"
         End If
 
-        ' 深度求索 (DeepSeek)
-        If urlLower.Contains("deepseek") Then
-            Return "deepseek-embedding"
-        End If
-
         ' OpenAI
         If urlLower.Contains("openai") Then
             Return "text-embedding-3-small"
         End If
 
-        ' 默认返回 OpenAI 格式
-        Return "text-embedding-3-small"
+        ' 未知提供商不猜测，返回 Nothing 让 IsEmbeddingAvailable 走降级路径
+        Return Nothing
     End Function
 
     ''' <summary>
@@ -67,6 +84,16 @@ Public Class EmbeddingService
     ''' </summary>
     Public Shared Async Function GetEmbeddingAsync(text As String) As Task(Of Single())
         Try
+            If Not IsEmbeddingAvailable() Then
+                Debug.WriteLine("[EmbeddingService] Embedding 不可用（配置不支持或 provider 不兼容）")
+                Return Nothing
+            End If
+
+            If _lastFailureTime.HasValue AndAlso (DateTime.UtcNow - _lastFailureTime.Value) < _failureCooldown Then
+                Debug.WriteLine($"[EmbeddingService] 在冷却期内（上次失败: {_lastFailureTime.Value:HH:mm:ss}），跳过请求")
+                Return Nothing
+            End If
+
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12
 
             Dim apiUrl = ConfigSettings.ApiUrl
@@ -121,6 +148,7 @@ Public Class EmbeddingService
                         Dim errorContent = Await response.Content.ReadAsStringAsync()
                         Debug.WriteLine($"[EmbeddingService] API 请求失败: {response.StatusCode} - {errorContent}")
                         Debug.WriteLine($"[EmbeddingService] 如果模型不支持，请在配置中设置正确的 EmbeddingModel")
+                        _lastFailureTime = DateTime.UtcNow
                         Return Nothing
                     End If
 
@@ -148,6 +176,7 @@ Public Class EmbeddingService
         Catch ex As Exception
             Debug.WriteLine($"[EmbeddingService] 出错: {ex.Message}")
             Debug.WriteLine($"[EmbeddingService] 堆栈: {ex.StackTrace}")
+            _lastFailureTime = DateTime.UtcNow
             Return Nothing
         End Try
     End Function

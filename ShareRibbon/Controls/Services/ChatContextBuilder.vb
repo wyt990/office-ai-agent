@@ -1,4 +1,4 @@
-﻿' ShareRibbon\Controls\Services\ChatContextBuilder.vb
+' ShareRibbon\Controls\Services\ChatContextBuilder.vb
 ' 分层上下文组装：[0]～[6]
 
 Imports System.Collections.Generic
@@ -107,7 +107,7 @@ Public Class ChatContextBuilder
             Else
                 Debug.WriteLine($"[ChatContextBuilder] 没有用户画像")
             End If
-            Dim memories = MemoryService.GetRelevantMemories(currentQuery, Nothing)
+            Dim memories = MemoryService.GetRelevantMemories(currentQuery, Nothing, Nothing, Nothing, appNorm)
             If memories IsNot Nothing AndAlso memories.Count > 0 Then
                 Debug.WriteLine($"[ChatContextBuilder] 找到 {memories.Count} 条相关记忆")
                 memoryParts.Add("[相关记忆]")
@@ -173,7 +173,7 @@ Public Class ChatContextBuilder
     ''' 简化：仅注入 Memory 层到现有 system，用于增量集成
     ''' </summary>
     ''' <param name="enableMemory">为 False 时直接返回 baseSystem</param>
-    Public Shared Function AppendMemoryToSystemPrompt(baseSystem As String, currentQuery As String, Optional enableMemory As Boolean = True) As String
+    Public Shared Function AppendMemoryToSystemPrompt(baseSystem As String, currentQuery As String, Optional enableMemory As Boolean = True, Optional appType As String = Nothing) As String
         If Not enableMemory Then Return baseSystem
 
         Dim parts As New List(Of String)()
@@ -183,7 +183,7 @@ Public Class ChatContextBuilder
         If Not String.IsNullOrWhiteSpace(userProfile) Then
             parts.Add("[用户画像]" & vbCrLf & userProfile)
         End If
-        Dim memories = MemoryService.GetRelevantMemories(currentQuery, Nothing)
+        Dim memories = MemoryService.GetRelevantMemories(currentQuery, Nothing, Nothing, Nothing, appType)
         If memories IsNot Nothing AndAlso memories.Count > 0 Then
             parts.Add("[相关记忆]")
             For Each m In memories

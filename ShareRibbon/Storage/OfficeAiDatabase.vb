@@ -1,4 +1,4 @@
-﻿' ShareRibbon\Storage\OfficeAiDatabase.vb
+' ShareRibbon\Storage\OfficeAiDatabase.vb
 ' Office AI 数据库初始化与迁移
 
 Imports System.Data.SQLite
@@ -233,7 +233,10 @@ CREATE INDEX IF NOT EXISTS idx_prompt_template_scenario ON prompt_template(scena
              "ALTER TABLE prompt_template ADD COLUMN priority INTEGER DEFAULT 50;" &
              "ALTER TABLE prompt_template ADD COLUMN enabled INTEGER DEFAULT 1;" &
              "ALTER TABLE prompt_template ADD COLUMN parameters_json TEXT DEFAULT '';" &
-             "UPDATE schema_version SET version = 5;"}
+             "UPDATE schema_version SET version = 5;"},
+            {6, "ALTER TABLE atomic_memory ADD COLUMN memory_type TEXT DEFAULT 'short_term';" &
+             "CREATE INDEX IF NOT EXISTS idx_atomic_memory_memory_type ON atomic_memory(memory_type);" &
+             "UPDATE schema_version SET version = 6;"}
         }
 
         For Each kvp In migrations.OrderBy(Function(x) x.Key)

@@ -1,4 +1,4 @@
-﻿' 存储配置的api大模型和api key
+' 存储配置的api大模型和api key
 Public Class ConfigSettings
     Private Sub New()
     End Sub
@@ -10,7 +10,7 @@ Public Class ConfigSettings
     Public Shared Property mcpable As Boolean
 
     ' Embedding 模型配置
-    Public Shared Property EmbeddingModel As String = "text-embedding-3-small"
+    Public Shared Property EmbeddingModel As String = ""
 
     ' FIM (Fill-In-the-Middle) 补全能力
     Public Shared Property fimSupported As Boolean = False

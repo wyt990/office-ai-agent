@@ -1376,9 +1376,16 @@ Public Class ConfigApiForm
 
                 If Not String.IsNullOrEmpty(selectedEmbeddingModelName) Then
                     ConfigSettings.EmbeddingModel = selectedEmbeddingModelName
+                Else
+                    ConfigSettings.EmbeddingModel = ""
                 End If
 
                 SaveConfig()
+
+                'If String.IsNullOrEmpty(selectedEmbeddingModelName) AndAlso Not EmbeddingService.IsEmbeddingAvailable() Then
+                '    MessageBox.Show("未选择向量模型且当前API可能不支持Embedding，Memory/RAG功能将仅使用关键词检索。" & vbCrLf &
+                '                    "如需向量检索，请选择一个向量模型。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information)
+                'End If
 
                 MessageBox.Show("配置已保存", "成功", MessageBoxButtons.OK, MessageBoxIcon.Information)
                 Me.DialogResult = DialogResult.OK
@@ -1615,9 +1622,16 @@ Public Class ConfigApiForm
 
                 If Not String.IsNullOrEmpty(selectedEmbeddingModelName) Then
                     ConfigSettings.EmbeddingModel = selectedEmbeddingModelName
+                Else
+                    ConfigSettings.EmbeddingModel = ""
                 End If
 
                 SaveConfig()
+
+                'If String.IsNullOrEmpty(selectedEmbeddingModelName) AndAlso Not EmbeddingService.IsEmbeddingAvailable() Then
+                '    MessageBox.Show("未选择向量模型且当前API可能不支持Embedding，Memory/RAG功能将仅使用关键词检索。" & vbCrLf &
+                '                    "如需向量检索，请选择一个向量模型。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information)
+                'End If
 
                 MessageBox.Show("配置已保存", "成功", MessageBoxButtons.OK, MessageBoxIcon.Information)
                 Me.DialogResult = DialogResult.OK
@@ -1781,16 +1795,16 @@ Public Class ConfigApiForm
     _memorySplitContainer.Panel1.Controls.Add(numRagTopN)
     y += 32
 
-    Dim lblAtomic As New Label() With {.Text = "记忆片段最大长度 (50-500)：", .Location = New Point(10, y + 2), .Size = New Size(160, 20)}
-    _memorySplitContainer.Panel1.Controls.Add(lblAtomic)
-    numAtomicMaxLen = New NumericUpDown() With {
+        Dim lblAtomic As New Label() With {.Text = "记忆片段最大长度 (10-2000)：", .Location = New Point(10, y + 2), .Size = New Size(160, 20)}
+        _memorySplitContainer.Panel1.Controls.Add(lblAtomic)
+        numAtomicMaxLen = New NumericUpDown() With {
             .Location = New Point(175, y),
             .Size = New Size(80, 24),
-            .Minimum = 50,
-            .Maximum = 500,
+            .Minimum = 10,
+            .Maximum = 20000,
             .Value = MemoryConfig.AtomicContentMaxLength
         }
-    _memorySplitContainer.Panel1.Controls.Add(numAtomicMaxLen)
+        _memorySplitContainer.Panel1.Controls.Add(numAtomicMaxLen)
     y += 32
 
     Dim lblSummary As New Label() With {.Text = "近期会话摘要条数 (1-15)：", .Location = New Point(10, y + 2), .Size = New Size(160, 20)}

@@ -1,4 +1,4 @@
-﻿Imports System.Text
+Imports System.Text
 Imports System.Text.RegularExpressions
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
@@ -26,104 +26,160 @@ Public Class RalphAgentController
     Public Property OnAgentCompleted As Action(Of Boolean)
     Public Property OnRequestUserConfirm As Action(Of String, Action, Action) ' 消息、确认回调、取消回调
 
-    ' AI请求委托（由BaseChatControl设置）
-    Public Property SendAIRequest As Func(Of String, String, Task(Of String))
+    ' AI请求委托（由BaseChatControl设置）- 第3参数为历史对话消息列表（可选）
+    Public Property SendAIRequest As Func(Of String, String, List(Of HistoryMessage), Task(Of String))
 
     ' 代码执行委托
     Public Property ExecuteCode As Action(Of String, String, Boolean)
 
-    ' Excel专用规划提示词
-    Private Const PLANNING_PROMPT_EXCEL As String = "你是一个智能Excel自动化专家。用户有一个任务需要在Excel中完成。
+    ' === Excel 规划提示词 ===
+    Private Const PLANNING_SYSTEM_EXCEL As String = "你是一个智能Excel自动化专家。请深度分析用户需求，结合识别到的意图、相关记忆和历史对话，制定一个详细、可执行的计划。每个步骤必须包含可直接执行的代码。
 
-当前选中/活动的内容:
-```
-{1}
-```
-
-【历史对话上下文】
-{5}
-
-用户当前需求: {2}
-
-【意图识别结果】
-{3}
-
-【相关记忆（RAG检索）】
-{4}
-
-请深度分析这个需求，结合识别到的意图、相关记忆和历史对话，制定一个详细、可执行的计划。每个步骤必须包含可直接执行的代码。
-
-直接返回JSON对象，格式如下:
-{{
+直接返回markdown的JSON代码块对象，格式如下:
+```{
   ""understanding"": ""对用户需求的理解（结合意图和记忆）"",
   ""steps"": [
     {{
       ""step"": 1,
       ""description"": ""步骤描述（用户可读）"",
-      ""code"": ""可执行的JSON命令"",
+      ""code"": ""可执行的Excel JSON命令，不能返回\n\r等转义字符"",
       ""language"": ""json""
     }}
   ],
   ""summary"": ""执行完成后的预期结果""
-}}
+}```
 
 【Excel代码格式要求】
-code字段必须使用JSON命令格式:
+code字段必须使用JSON命令格式，不能包含\n、\r等换行转义字符，这不符合json规范:
 - 单命令: {{""command"":""ApplyFormula"",""params"":{{""targetRange"":""C1:C100"",""formula"":""=A1+B1""}}}}
 - 多命令: {{""commands"":[{{""command"":""ApplyFormula"",""params"":{{...}}}},...]}}
-- Excel只支持这些command: ApplyFormula, WriteData, FormatRange, CreateChart, CleanData
-- ApplyFormula参数: targetRange(必需), formula(必需), fillDown(可选)
-- WriteData参数: targetRange(必需), data(必需)
-- FormatRange参数: range(必需), style(可选)
-- CreateChart参数: dataRange(必需), chartType(可选)
-- CleanData参数: range(必需), operation(必需)
-- 动态范围使用{{lastRow}}占位符
 
-注意：
-1. 每个步骤的code字段必须是可直接执行的完整代码
-2. 不要对JSON引号进行转义
-3. 只返回一个JSON对象，不要其他内容"
+【Excel支持的22个命令】
 
-    ' Word专用规划提示词
-    Private Const PLANNING_PROMPT_WORD As String = "你是一个智能Word自动化专家。用户有一个任务需要在Word中完成。
+=== 基础操作 (5个) ===
+1. ApplyFormula - 应用公式 {targetRange:必需, formula:必需, fillDown:可选}
+2. WriteData - 写入数据 {targetRange:必需, data:必需(单值或二维数组)}
+3. FormatRange - 格式化 {range:必需, style:header/total/data, bold/italic/fontSize/backgroundColor/fontColor, borders:true/""all""/""outline""/""none""}
+4. CreateChart - 创建图表 {dataRange:必需, type:column/line/pie/bar/scatter/area, title:可选, position:可选, seriesNames:系列名称数组, categoryAxis:分类轴范围, legendPosition:right/left/top/bottom}
+5. CleanData - 数据清洗 {range:必需, operation:removeduplicates/fillempty/trim/replace}
 
-当前选中/活动的内容:
-```
-{1}
-```
+=== 数据操作 (8个) ===
+6. SortData - 排序 {range:必需, sortColumn:列号从1开始, order:asc/desc, hasHeader:默认true}
+7. FilterData - 筛选 {range:必需, column:列号, criteria:筛选条件如"">100"", clearFilter:true则清除}
+8. RemoveDuplicates - 删除重复 {range:必需, columns:列号数组(可选), hasHeader:可选}
+9. ConditionalFormat - 条件格式 {range:必需, rule:highlight/databar/colorscale/iconset, condition:可选, color:可选}
+10. MergeCells - 合并单元格 {range:必需, unmerge:true则取消合并}
+11. AutoFit - 自动调整 {range:必需, type:columns/rows/both}
+12. FindReplace - 查找替换 {range:""all""或指定范围, find:必需, replace:必需, matchCase:可选, matchEntireCell:可选}
+13. CreatePivotTable - 透视表 {sourceRange:必需, targetCell:必需, rowFields:数组, valueFields:数组, columnFields:可选}
 
-【历史对话上下文】
-{5}
+=== 工作表操作 (4个) ===
+14. CreateSheet - 创建工作表 {name:必需, position:before/after, referenceSheet:可选}
+15. DeleteSheet - 删除工作表 {name:必需}
+16. RenameSheet - 重命名 {oldName:必需, newName:必需}
+17. CopySheet - 复制工作表 {sourceName:必需, newName:必需}
 
-用户当前需求: {2}
+=== 高级功能 (4个) ===
+18. InsertRowCol - 插入行列 {type:row/column, position:行号或列字母, count:默认1}
+19. DeleteRowCol - 删除行列 {type:row/column, position:必需, count:默认1}
+20. HideRowCol - 隐藏行列 {type:row/column, position:必需, unhide:true则取消隐藏}
+21. ProtectSheet - 保护工作表 {sheetName:可选, password:可选, unprotect:true则取消保护}
 
-【意图识别结果】
-{3}
+=== VBA回退 (1个) ===
+22. ExecuteVBA - 执行VBA代码 {code:必需,完整的Sub或Function代码}
+    当以上命令无法满足需求时,生成VBA代码作为回退方案
 
-【相关记忆（RAG检索）】
-{4}
+【动态范围占位符】
+使用 {lastRow} 表示最后一行，{lastCol} 表示最后一列，{selection} 表示当前选择
 
-请深度分析这个需求，结合识别到的意图、相关记忆和历史对话，制定一个详细、可执行的计划。每个步骤必须包含可直接执行的代码。
+【绝对禁止】
+- 禁止使用 actions/operations 数组
+- 禁止省略 params 包装
+- 禁止自创其他命令（如translateText等）
+- 禁止使用Word/PowerPoint专属命令
+- 禁止返回不带代码块的裸JSON
 
-直接返回JSON对象，格式如下:
-{{
+【不支持的功能 - 请告知用户使用工具栏按钮】
+- 翻译功能：请告知用户点击工具栏上的「AI翻译」按钮
+- 校对功能：请告知用户点击工具栏上的「AI校对」按钮
+
+【决策优先级】
+1. 优先使用上述22个命令处理需求
+2. 需求不明确时，用中文询问用户
+3. 每个步骤的code字段必须是可直接执行的完整代码
+4. 不要对JSON引号进行转义，不能包含\n、\r等换行转义字符，这不符合json规范
+5. 只返回一个JSON对象，不要其他内容"
+
+    ' === Word 规划提示词 ===
+    Private Const PLANNING_SYSTEM_WORD As String = "你是一个智能Word自动化专家。请深度分析用户需求，结合识别到的意图、相关记忆和历史对话，制定一个详细、可执行的计划。每个步骤必须包含可直接执行的代码。
+
+直接返回markdown的JSON代码块对象，格式如下:
+```{
   ""understanding"": ""对用户需求的理解（结合意图和记忆）"",
   ""steps"": [
     {{
       ""step"": 1,
       ""description"": ""步骤描述（用户可读）"",
-      ""code"": ""可执行的JSON命令"",
+      ""code"": ""可执行的Excel JSON命令，不能返回\n\r等转义字符"",
       ""language"": ""json""
     }}
   ],
   ""summary"": ""执行完成后的预期结果""
-}}
+}```
 
 【Word代码格式要求】
 code字段必须是JSON命令格式:
 - 单命令: {{""command"":""InsertText"",""params"":{{""content"":""文本""}}}}
 - 多命令: {{""commands"":[{{""command"":""InsertText"",""params"":{{""content"":""文本""}}}},...]}}
-- Word支持的command: InsertText, FormatText, ReplaceText, InsertTable, ApplyStyle, GenerateTOC, BeautifyDocument
+
+【Word支持的22个命令】
+
+=== 基础文本操作 (5个) ===
+1. InsertText - 插入文本 {content:必需, position:cursor/start/end}
+2. FormatText - 格式化 {range:selection/all, bold/italic/fontSize/fontName/underline/color}
+3. ReplaceText - 查找替换 {find:必需, replace:必需, matchCase:可选}
+4. DeleteText - 删除文本 {range:selection/all}
+5. CopyPasteText - 复制粘贴 {sourceRange:必需, targetPosition:可选}
+
+=== 段落和样式 (5个) ===
+6. ApplyStyle - 应用样式 {styleName:必需如""标题 1"", range:selection/paragraph}
+7. SetParagraphFormat - 段落格式 {alignment:left/center/right/justify, firstLineIndent/beforeSpacing/afterSpacing}
+8. InsertParagraph - 插入段落 {count:默认1, pageBreak:true则分页}
+9. SetLineSpacing - 行距 {spacing:1/1.5/2, range:selection/all}
+10. SetIndent - 缩进 {left/right/firstLine:cm值}
+
+=== 表格操作 (4个) ===
+11. InsertTable - 插入表格 {rows:必需, cols:必需, data:可选}
+12. FormatTable - 格式化表格 {tableIndex:从1开始, style/borders/headerRow}
+13. InsertTableRow - 插入行 {tableIndex:必需, position:after/before}
+14. DeleteTableRow - 删除行 {tableIndex:必需, rowIndex:必需}
+
+=== 文档结构 (4个) ===
+15. GenerateTOC - 生成目录 {position:start/cursor, levels:1-9}
+16. InsertHeader - 页眉 {content:必需, alignment:left/center/right}
+17. InsertFooter - 页脚 {content:必需, alignment:left/center/right}
+18. InsertPageNumber - 页码 {position:header/footer, alignment}
+
+=== 文档美化 (2个) ===
+19. BeautifyDocument - 美化 {theme:{h1/h2/body设置}, margins:{top/bottom/left/right}}
+20. SetPageMargins - 页边距 {top/bottom/left/right:cm值}
+
+=== 高级功能 (1个) ===
+21. InsertImage - 插入图片 {imagePath:必需, width/height:可选}
+
+=== VBA回退 (1个) ===
+22. ExecuteVBA - VBA代码 {code:必需,完整Sub/Function}
+
+【绝对禁止】
+- 禁止使用 actions/operations 数组
+- 禁止省略 params 包装
+- 禁止使用Excel/PowerPoint专属命令
+
+【决策优先级】
+1. 优先使用上述22个命令
+2. 复杂需求用ExecuteVBA
+3. 翻译用工具栏按钮
+4. 需求不明确时中文询问
 
 【重要】Word文本格式要求:
 1. 段落之间必须使用 \n\n (两个换行符) 分隔
@@ -136,142 +192,135 @@ code字段必须是JSON命令格式:
 2. 不要对JSON引号进行转义
 3. 只返回一个JSON对象，不要其他内容"
 
-    ' PowerPoint专用规划提示词
-    Private Const PLANNING_PROMPT_POWERPOINT As String = "你是一个智能PowerPoint自动化专家。用户有一个任务需要在PowerPoint中完成。
+    ' === PowerPoint 规划提示词 ===
+    Private Const PLANNING_SYSTEM_PPT As String = "你是一个智能PowerPoint自动化专家。请深度分析用户需求，结合识别到的意图、相关记忆和历史对话，制定一个详细、可执行的计划。每个步骤必须包含可直接执行的代码。
 
-当前选中/活动的内容:
-```
-{1}
-```
-
-【历史对话上下文】
-{5}
-
-用户当前需求: {2}
-
-【意图识别结果】
-{3}
-
-【相关记忆（RAG检索）】
-{4}
-
-请深度分析这个需求，结合识别到的意图、相关记忆和历史对话，制定一个详细、可执行的计划。每个步骤必须包含可直接执行的代码。
-
-直接返回JSON对象，格式如下:
-{{
+直接返回markdown的JSON代码块对象，格式如下:
+{
   ""understanding"": ""对用户需求的理解（结合意图和记忆）"",
   ""steps"": [
     {{
       ""step"": 1,
       ""description"": ""步骤描述（用户可读）"",
-      ""code"": ""可执行的VBA代码"",
-      ""language"": ""vba""
+      ""code"": ""可执行的Excel JSON命令，不能返回\n\r等转义字符"",
+      ""language"": ""json""
     }}
   ],
   ""summary"": ""执行完成后的预期结果""
-}}
+}
 
-【PowerPoint代码格式要求】
-code字段可以是VBA代码。
+
+【PowerPoint支持的22个命令】
+
+=== 幻灯片操作 (5个) ===
+1. InsertSlide - 插入幻灯片 {position:current/end, layout, title, content}
+2. DeleteSlide - 删除幻灯片 {slideIndex:必需,-1当前}
+3. DuplicateSlide - 复制幻灯片 {slideIndex:必需}
+4. MoveSlide - 移动幻灯片 {fromIndex:必需, toIndex:必需}
+5. CreateSlides - 批量创建 {slides:数组含title/content/layout}
+
+=== 内容操作 (5个) ===
+6. InsertText - 插入文本 {content:必需, slideIndex:-1当前, x/y:可选}
+7. FormatText - 格式化文本 {bold/italic/fontSize/fontName/color}
+8. InsertShape - 插入形状 {shapeType:必需, x:必需, y:必需}
+9. InsertImage - 插入图片 {imagePath:必需, x/y/width/height:可选}
+10. InsertTable - 插入表格 {rows:必需, cols:必需, data:可选}
+
+=== 样式和动画 (5个) ===
+11. FormatSlide - 格式化幻灯片 {background, layout}
+12. AddAnimation - 添加动画 {effect:fadeIn/flyIn/zoom/wipe, targetShapes:all/title}
+13. ApplyTransition - 切换效果 {transitionType:fade/push/wipe, scope:all/current}
+14. BeautifySlides - 美化 {scope:all/current, theme:{background/titleFont/bodyFont}}
+15. SetSlideLayout - 设置布局 {layout:title/titleAndContent/blank}
+
+=== 高级功能 (4个) ===
+16. InsertChart - 插入图表 {chartType:column/line/pie, data:二维数组}
+17. InsertVideo - 插入视频 {videoPath:必需, autoPlay:可选}
+18. AddSpeakerNotes - 演讲备注 {notes:必需, slideIndex:可选}
+19. SetSlideShow - 放映设置 {loopUntilEsc/advanceMode等}
+
+=== 母版和主题 (2个) ===
+20. ApplyTheme - 应用主题 {themeName或themeFile}
+21. EditSlideMaster - 编辑母版 {background/titleFont/bodyFont}
+
+=== VBA回退 (1个) ===
+22. ExecuteVBA - VBA代码 {code:必需,完整Sub/Function}
+
+【绝对禁止】
+- 禁止使用 actions/operations 数组
+- 禁止省略 params 包装
+- 禁止使用Excel/Word专属命令
+
+【决策优先级】
+1. 优先使用上述22个命令
+2. 复杂需求用ExecuteVBA
+3. 翻译用工具栏按钮
+4. 需求不明确时中文询问
 
 注意：
 1. 每个步骤的code字段必须是可直接执行的完整代码
 2. 不要对JSON引号进行转义
 3. 只返回一个JSON对象，不要其他内容"
 
-    ' 获取对应应用的规划提示词
-    Private Function GetPlanningPrompt(appType As String) As String
+    ' === 规划 user 模板（所有应用共用，历史对话通过 messages 数组传递，不再嵌入文本） ===
+    Private Const PLANNING_USER_TEMPLATE As String = "当前选中/活动的内容:
+```
+{0}
+```
+
+用户当前需求: {1}
+
+【意图识别结果】
+{2}
+
+【相关记忆（RAG检索）】
+{3}"
+
+    Private Function GetPlanningPrompt(appType As String) As Tuple(Of String, String)
+        Dim sys As String
         Select Case appType.ToLower()
             Case "excel"
-                Return PLANNING_PROMPT_EXCEL
+                sys = PLANNING_SYSTEM_EXCEL
             Case "word"
-                Return PLANNING_PROMPT_WORD
+                sys = PLANNING_SYSTEM_WORD
             Case "powerpoint", "ppt"
-                Return PLANNING_PROMPT_POWERPOINT
+                sys = PLANNING_SYSTEM_PPT
             Case Else
-                Return PLANNING_PROMPT_EXCEL
+                sys = PLANNING_SYSTEM_EXCEL
         End Select
+        Return Tuple.Create(sys, PLANNING_USER_TEMPLATE)
     End Function
 
-    ' 步骤执行提示词
-    Private Const STEP_EXECUTION_PROMPT As String = "你是一个Office自动化专家。现在需要执行以下操作：
+    Private Const STEP_EXECUTION_SYSTEM As String = "你是一个Office自动化专家。请根据Office类型生成可以直接执行的代码。
 
-当前Office应用: {0}
+【Excel】必须使用JSON命令格式:
+- 单命令: {{""command"":""ApplyFormula"",""params"":{{""targetRange"":""C1:C100"",""formula"":""=A1+B1""}}}}
+- 多命令: {{""commands"":[{{""command"":""ApplyFormula"",""params"":{{...}}}},...]}}
+- Excel只支持这些command: ApplyFormula, WriteData, FormatRange, CreateChart, CleanData
+- ApplyFormula参数: targetRange(必需), formula(必需), fillDown(可选)
+- WriteData参数: targetRange(必需), data(必需)
+- FormatRange参数: range(必需), style(可选)
+- CreateChart参数: dataRange(必需), chartType(可选)
+- CleanData参数: range(必需), operation(必需)
+- 动态范围使用{{lastRow}}占位符
+
+【Word】必须使用JSON命令格式:
+- 单命令: {{""command"":""InsertText"",""params"":{{""content"":""文本""}}}}
+- 多命令: {{""commands"":[{{""command"":""InsertText"",""params"":{{""content"":""文本""}}}},...]}}
+- Word支持的command: InsertText, FormatText, ReplaceText, InsertTable, ApplyStyle, GenerateTOC, BeautifyDocument
+
+【PowerPoint】使用VBA代码
+
+只返回可执行的代码，用```vba或```json包裹。"
+
+    Private Const STEP_EXECUTION_USER As String = "当前Office应用: {0}
 当前文档内容:
 ```
 {1}
 ```
 
 要执行的步骤: {2}
-步骤详情: {3}
-
-请生成可以直接执行的代码。根据Office类型选择合适的代码格式：
-
-【Excel】必须使用JSON命令格式，格式如下：
-单个命令：
-```json
-{{
-  ""command"": ""ApplyFormula"",
-  ""params"": {{
-    ""targetRange"": ""C1:C100"",
-    ""formula"": ""=A1+B1""
-  }}
-}}
-```
-多个命令：
-```json
-{{
-  ""commands"": [
-    {{
-      ""command"": ""ApplyFormula"",
-      ""params"": {{ ""targetRange"": ""C1"", ""formula"": ""=A1+B1"" }}
-    }},
-    {{
-      ""command"": ""WriteData"",
-      ""params"": {{ ""targetRange"": ""D1"", ""data"": [[""标题""]] }}
-    }}
-  ]
-}}
-```
-Excel只支持这些command: ApplyFormula, WriteData, FormatRange, CreateChart, CleanData
-- ApplyFormula参数: targetRange(必需), formula(必需), fillDown(可选)
-- WriteData参数: targetRange(必需), data(必需)
-- FormatRange参数: range(必需), style(可选)
-- CreateChart参数: dataRange(必需), chartType(可选)
-- CleanData参数: range(必需), operation(必需)
-动态范围使用{{lastRow}}占位符
-
-【Word】必须使用JSON命令格式，格式如下：
-单个命令：
-```json
-{{
-  ""command"": ""InsertText"",
-  ""params"": {{
-    ""position"": ""cursor"",
-    ""content"": ""要插入的文本""
-  }}
-}}
-```
-多个命令：
-```json
-{{
-  ""commands"": [
-    {{
-      ""command"": ""InsertText"",
-      ""params"": {{ ""content"": ""文本内容"" }}
-    }},
-    {{
-      ""command"": ""FormatText"",
-      ""params"": {{ ""range"": ""selection"", ""bold"": true }}
-    }}
-  ]
-}}
-```
-Word支持的command类型：InsertText, FormatText, ReplaceText, InsertTable, ApplyStyle, GenerateTOC, BeautifyDocument
-
-【PowerPoint】使用VBA代码
-
-只返回可执行的代码，用```vba或```json包裹。"
+步骤详情: {3}"
 
     Public Sub New()
         _memory = RalphLoopMemory.Instance
@@ -301,25 +350,34 @@ Word支持的command类型：InsertText, FormatText, ReplaceText, InsertTable, A
 
             ' 步骤2: 记忆RAG检索
             OnStatusChanged?.Invoke("正在检索相关记忆...")
-            _ragMemories = MemoryService.GetRelevantMemories(userRequest, 5)
+            _ragMemories = MemoryService.GetRelevantMemories(userRequest, 5, Nothing, Nothing, appType)
             Debug.WriteLine($"[RalphAgent] 检索到 {_ragMemories.Count} 条相关记忆")
 
-            ' 步骤3: 格式化历史对话
-            Dim historyInfo = FormatHistoryMessages(historyMessages)
-            Dim historyCount = If(historyMessages IsNot Nothing, historyMessages.Count, 0)
-            Debug.WriteLine($"[RalphAgent] 历史对话包含 {historyCount} 条消息")
-            Debug.WriteLine(historyMessages)
+            ' 步骤3: 转换历史对话为 HistoryMessage 列表（符合 OpenAI API messages 规范）
+            Dim historyMsgs As New List(Of HistoryMessage)()
+            If historyMessages IsNot Nothing Then
+                Dim limit = MemoryConfig.SessionSummaryLimit
+                Dim startIdx = Math.Max(0, historyMessages.Count - limit)
+                For i = startIdx To historyMessages.Count - 1
+                    Dim msg = historyMessages(i)
+                    Dim role = If(msg.Item1 = "user", "user", "assistant")
+                    If Not String.IsNullOrEmpty(msg.Item2) Then
+                        historyMsgs.Add(New HistoryMessage With {.role = role, .content = msg.Item2})
+                    End If
+                Next
+            End If
+            Debug.WriteLine($"[RalphAgent] 历史对话包含 {historyMsgs.Count} 条消息，将作为 messages 数组发送")
 
             ' 步骤4: 制定执行计划
             OnStatusChanged?.Invoke("正在制定执行计划...")
             Dim intentInfo = FormatIntentInfo(_intentResult)
             Dim ragInfo = FormatRagMemories(_ragMemories)
 
-            ' 调用AI进行规划
-            Dim planningPrompt = GetPlanningPrompt(appType)
-            Dim prompt = String.Format(planningPrompt, appType, currentContent, userRequest, intentInfo, ragInfo, historyInfo)
-            Debug.WriteLine($"[RalphAgent] 规划提示词:\n{prompt}")
-            Dim response = Await SendAIRequest(prompt, "")
+            Dim planningParts = GetPlanningPrompt(appType)
+            Dim systemPrompt = planningParts.Item1
+            Dim userPrompt = String.Format(planningParts.Item2, currentContent, userRequest, intentInfo, ragInfo)
+            Debug.WriteLine($"[RalphAgent] system 提示词长度: {systemPrompt.Length}, user 提示词长度: {userPrompt.Length}")
+            Dim response = Await SendAIRequest(userPrompt, systemPrompt, historyMsgs)
 
             ' 解析规划结果
             If ParsePlanningResult(response) Then
@@ -355,6 +413,8 @@ Word支持的command类型：InsertText, FormatText, ReplaceText, InsertTable, A
 
             ' 3. 修复转义引号问题
             fixedJson = fixedJson.Replace("\""", """")
+            fixedJson = fixedJson.Replace("\n", "")
+            fixedJson = fixedJson.Replace("\r", "")
 
             ' 4. 修复常见的格式问题
             ' 修复多行字符串中缺少的引号
@@ -447,7 +507,7 @@ Word支持的command类型：InsertText, FormatText, ReplaceText, InsertTable, A
                 Return False
             End If
 
-            Debug.WriteLine($"[RalphAgent] 提取到JSON，长度: {jsonStr.Length}")
+            Debug.WriteLine($"[RalphAgent] 提取到JSON: {jsonStr}")
 
             ' 处理可能的转义符问题
             Dim planObj As JObject = Nothing
@@ -664,13 +724,13 @@ Word支持的command类型：InsertText, FormatText, ReplaceText, InsertTable, A
             ' 如果规划时没有生成代码（兼容旧格式），则调用LLM生成
             If String.IsNullOrEmpty(code) Then
                 Debug.WriteLine($"[RalphAgent] 步骤 {stepIndex + 1} 没有预生成代码，调用LLM生成")
-                Dim prompt = String.Format(STEP_EXECUTION_PROMPT,
+                Dim stepUserPrompt = String.Format(STEP_EXECUTION_USER,
                     _currentSession.ApplicationType,
                     _currentSession.CurrentContent,
                     currentStep.Description,
                     currentStep.Detail)
 
-                Dim codeResponse = Await SendAIRequest(prompt, "")
+                Dim codeResponse = Await SendAIRequest(stepUserPrompt, STEP_EXECUTION_SYSTEM, Nothing)
                 code = ExtractCode(codeResponse)
                 language = DetectLanguage(codeResponse)
                 currentStep.GeneratedCode = code

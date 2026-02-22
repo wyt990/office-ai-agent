@@ -1,4 +1,4 @@
-' ShareRibbon\Config\MemoryConfig.vb
+﻿' ShareRibbon\Config\MemoryConfig.vb
 ' 记忆相关配置项
 
 Imports System.IO
@@ -99,7 +99,7 @@ Public Class MemoryConfig
         End Get
         Set(value As Integer)
             LoadConfig()
-            _config.AtomicContentMaxLength = Math.Max(50, Math.Min(500, value))
+            _config.AtomicContentMaxLength = Math.Max(10, Math.Min(20000, value))
             SaveConfig()
         End Set
     End Property
@@ -129,6 +129,28 @@ Public Class MemoryConfig
         End Set
     End Property
 
+    Public Shared Property RagSimilarityThreshold As Single
+        Get
+            Return LoadConfig().RagSimilarityThreshold
+        End Get
+        Set(value As Single)
+            LoadConfig()
+            _config.RagSimilarityThreshold = Math.Max(0.0F, Math.Min(1.0F, value))
+            SaveConfig()
+        End Set
+    End Property
+
+    Public Shared Property RagTimeDecayRate As Single
+        Get
+            Return LoadConfig().RagTimeDecayRate
+        End Get
+        Set(value As Single)
+            LoadConfig()
+            _config.RagTimeDecayRate = Math.Max(0.0F, Math.Min(1.0F, value))
+            SaveConfig()
+        End Set
+    End Property
+
     Private Class MemoryConfigData
         Public Property RagTopN As Integer = 5
         Public Property EnableAgenticSearch As Boolean = False
@@ -136,5 +158,7 @@ Public Class MemoryConfig
         Public Property AtomicContentMaxLength As Integer = 200
         Public Property SessionSummaryLimit As Integer = 5
         Public Property UseContextBuilder As Boolean = True
+        Public Property RagSimilarityThreshold As Single = 0.3F
+        Public Property RagTimeDecayRate As Single = 0.01F
     End Class
 End Class

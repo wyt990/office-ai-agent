@@ -860,7 +860,7 @@ Public MustInherit Class BaseChatControl
         End If
         If Not String.IsNullOrWhiteSpace(question) Then
             Try
-                Dim memories = MemoryService.GetRelevantMemories(StripQuestion(question), 2)
+                Dim memories = MemoryService.GetRelevantMemories(question, 2, Nothing, Nothing, GetOfficeAppType())
                 If memories IsNot Nothing AndAlso memories.Count > 0 Then
                     Dim lines As New List(Of String)()
                     For Each m In memories
@@ -1886,6 +1886,18 @@ Public MustInherit Class BaseChatControl
                              Dim contextSnapshot = GetContextSnapshot()
                              EnrichContextForIntent(contextSnapshot, originalQuestion, filePaths, selectedContents)
 
+                             ' 注入最近的历史对话，让意图识别能结合上下文
+                             Dim recentHistory = systemHistoryMessageData.Where(Function(m) m.role <> "system" AndAlso Not String.IsNullOrEmpty(m.content)).ToList()
+                             If recentHistory.Count > 0 Then
+                                 Dim historyArray As New JArray()
+                                 Dim takeCount = Math.Min(6, recentHistory.Count)
+                                 For i = recentHistory.Count - takeCount To recentHistory.Count - 1
+                                     Dim hMsg = recentHistory(i)
+                                     historyArray.Add(New JObject From {{"role", hMsg.role}, {"content", If(hMsg.content?.Length > 300, hMsg.content.Substring(0, 300) & "...", hMsg.content)}})
+                                 Next
+                                 contextSnapshot("conversationHistory") = historyArray
+                             End If
+
                              ' 使用异步方法进行意图识别（调用大模型）
                              CurrentIntentResult = Await IntentService.IdentifyIntentAsync(originalQuestion, contextSnapshot)
                              CurrentIntentResult.OriginalInput = originalQuestion
@@ -2260,6 +2272,8 @@ Public MustInherit Class BaseChatControl
     Private _agentThinkingUuid As String = Nothing
     ' Agent的原始用户请求（用于保存到历史记录）
     Private _agentOriginalUserRequest As String = Nothing
+    ' Agent完整用户消息（包含选中内容+文件解析内容，用于历史和记忆存储）
+    Private _agentFullUserMessage As String = Nothing
 
     ''' <summary>
     ''' 初始化Agent控制器
@@ -2287,17 +2301,18 @@ Public MustInherit Class BaseChatControl
                                                     End Sub
 
             _ralphAgentController.OnAgentCompleted = Sub(success)
-                                                         ' 保存用户消息到历史
-                                                         If Not String.IsNullOrWhiteSpace(_agentOriginalUserRequest) Then
-                                                             ' 保存到 systemHistoryMessageData（主要历史记录）
+                                                         ' 使用完整用户消息（含引用内容+文件），回退到原始请求
+                                                         Dim userMsgForHistory = If(Not String.IsNullOrWhiteSpace(_agentFullUserMessage), _agentFullUserMessage, _agentOriginalUserRequest)
+
+                                                         ' 保存用户消息到历史（包含完整的引用/文件内容）
+                                                         If Not String.IsNullOrWhiteSpace(userMsgForHistory) Then
                                                              systemHistoryMessageData.Add(New HistoryMessage With {
                                                                  .role = "user",
-                                                                 .content = _agentOriginalUserRequest
+                                                                 .content = userMsgForHistory
                                                              })
                                                              ManageHistoryMessageSize()
-                                                             ' 同时也保存到 ChatStateService
-                                                             _chatStateService?.AddMessage("user", _agentOriginalUserRequest)
-                                                             Debug.WriteLine($"[Agent] 已保存用户消息到历史: {_agentOriginalUserRequest}")
+                                                             _chatStateService?.AddMessage("user", userMsgForHistory)
+                                                             Debug.WriteLine($"[Agent] 已保存完整用户消息到历史，长度: {userMsgForHistory.Length}")
                                                          End If
 
                                                          ' 保存 Assistant 回复到历史
@@ -2307,29 +2322,28 @@ Public MustInherit Class BaseChatControl
                                                              If Not String.IsNullOrEmpty(session.Understanding) Then
                                                                  assistantReply = session.Understanding & vbCrLf & vbCrLf & assistantReply
                                                              End If
-                                                             ' 保存到 systemHistoryMessageData（主要历史记录）
                                                              systemHistoryMessageData.Add(New HistoryMessage With {
                                                                  .role = "assistant",
                                                                  .content = assistantReply
                                                              })
                                                              ManageHistoryMessageSize()
-                                                             ' 同时也保存到 ChatStateService
                                                              _chatStateService?.AddMessage("assistant", assistantReply)
                                                              Debug.WriteLine($"[Agent] 已保存Assistant回复到历史")
 
-                                                             ' 异步保存到原子记忆
-                                                             MemoryService.SaveAtomicMemoryAsync(_agentOriginalUserRequest, assistantReply, _chatStateService.CurrentSessionId, GetOfficeAppType())
+                                                             ' 记忆存储：user 侧用完整消息（含文件/引用），确保 RAG 可检索
+                                                             MemoryService.SaveConversationTurnAsync(userMsgForHistory, assistantReply, _chatStateService.CurrentSessionId, GetOfficeAppType())
                                                          End If
 
                                                          ' 清除临时变量
                                                          _agentOriginalUserRequest = Nothing
+                                                         _agentFullUserMessage = Nothing
 
                                                          ExecuteJavaScriptAsyncJS($"completeAgent('{_ralphAgentController.GetCurrentSession()?.Id}', {success.ToString().ToLower()}, '')")
                                                      End Sub
 
-            ' 设置AI请求委托，传入thinkingUuid
-            _ralphAgentController.SendAIRequest = Async Function(prompt, sysPrompt)
-                                                      Return Await SendAndGetResponse(prompt, sysPrompt, agentThinkingUuid)
+            ' 设置AI请求委托，传入thinkingUuid（第3参数为历史消息列表）
+            _ralphAgentController.SendAIRequest = Async Function(prompt, sysPrompt, historyMsgs)
+                                                      Return Await SendAndGetResponse(prompt, sysPrompt, historyMsgs, agentThinkingUuid)
                                                   End Function
 
             ' 设置代码执行委托
@@ -2545,6 +2559,9 @@ Public MustInherit Class BaseChatControl
             finalMessageToLLM &= fileContent
         End If
 
+        ' 保存完整用户消息（含选中内容+文件内容），供 OnAgentCompleted 存入历史和记忆
+        _agentFullUserMessage = finalMessageToLLM
+
         Task.Run(Async Function()
                      Try
                          ' 获取当前Office内容
@@ -2667,13 +2684,10 @@ Public MustInherit Class BaseChatControl
 
     ''' <summary>
     ''' 发送AI请求并获取完整响应（用于Agent规划）
+    ''' 当 historyMessages 不为空时，构建符合 OpenAI API 规范的 messages 数组：[system, ...history(user/assistant), user]
     ''' </summary>
-    Private Async Function SendAndGetResponse(prompt As String, systemPrompt As String, Optional responseUuid As String = Nothing) As Task(Of String)
-        ' 这里需要实现一个同步等待AI响应的方法
-        ' 简单实现：使用Send方法但收集完整响应
+    Private Async Function SendAndGetResponse(prompt As String, systemPrompt As String, Optional historyMessages As List(Of HistoryMessage) = Nothing, Optional responseUuid As String = Nothing) As Task(Of String)
         Try
-            Dim responseBuilder As New StringBuilder()
-            Dim completed As Boolean = False
             Dim uuid = If(responseUuid, Guid.NewGuid().ToString())
 
             ' 创建临时的响应收集器
@@ -2681,8 +2695,28 @@ Public MustInherit Class BaseChatControl
             _agentResponseUuid = uuid
             _agentResponseCompleted = False
 
-            ' 发送请求，传入responseUuid
-            Await Send(prompt, systemPrompt, False, "agent_planning", Nothing, uuid)
+            If historyMessages IsNot Nothing AndAlso historyMessages.Count > 0 Then
+                ' 构建符合 OpenAI API 的 messages 数组：system → history(user/assistant) → user
+                Dim messagesArray As New JArray()
+                messagesArray.Add(New JObject From {{"role", "system"}, {"content", If(systemPrompt, "")}})
+                For Each msg In historyMessages
+                    If Not String.IsNullOrEmpty(msg.content) Then
+                        messagesArray.Add(New JObject From {{"role", msg.role}, {"content", msg.content}})
+                    End If
+                Next
+                messagesArray.Add(New JObject From {{"role", "user"}, {"content", prompt}})
+
+                Dim requestObj As New JObject()
+                requestObj("model") = ConfigSettings.ModelName
+                requestObj("messages") = messagesArray
+                requestObj("stream") = True
+                Dim requestBody = requestObj.ToString(Newtonsoft.Json.Formatting.None)
+
+                Debug.WriteLine($"[SendAndGetResponse] 包含 {historyMessages.Count} 条历史消息，总消息数: {messagesArray.Count}")
+                Await SendHttpRequestStream(ConfigSettings.ApiUrl, ConfigSettings.ApiKey, requestBody, prompt, Guid.NewGuid().ToString(), False, "agent_planning", uuid)
+            Else
+                Await Send(prompt, systemPrompt, False, "agent_planning", Nothing, uuid)
+            End If
 
             ' 等待响应完成（最多60秒）
             Dim timeout = 60000
@@ -3640,7 +3674,7 @@ Public MustInherit Class BaseChatControl
             ' 阶段三：若使用 RAG 或带意图，在 Chat 中显示简短提示
             Dim ragCount As Integer = 0
             If addHistory AndAlso MemoryConfig.UseContextBuilder AndAlso (MemoryConfig.EnableUserProfile OrElse MemoryConfig.RagTopN > 0) Then
-                Dim mems = MemoryService.GetRelevantMemories(StripQuestion(question), MemoryConfig.RagTopN)
+                Dim mems = MemoryService.GetRelevantMemories(question, MemoryConfig.RagTopN, Nothing, Nothing, GetOfficeAppType())
                 ragCount = If(mems IsNot Nothing, mems.Count, 0)
             End If
             If ragCount > 0 OrElse Not String.IsNullOrEmpty(intentDescription) Then
@@ -3648,7 +3682,7 @@ Public MustInherit Class BaseChatControl
                 Dim js As String = $"showContextHints({{ ragCount: {ragCount}, intent: '{intentEscaped}' }});"
                 ExecuteJavaScriptAsyncJS(js)
             End If
-            Await SendHttpRequestStream(ConfigSettings.ApiUrl, ConfigSettings.ApiKey, requestBody, StripQuestion(question), requestUuid, addHistory, responseMode, responseUuid)
+            Await SendHttpRequestStream(ConfigSettings.ApiUrl, ConfigSettings.ApiKey, requestBody, question, requestUuid, addHistory, responseMode, responseUuid)
             Await SaveFullWebPageAsync2()
         Catch ex As Exception
             MessageBox.Show("请求失败: " & ex.Message, "错误", MessageBoxButtons.OK, MessageBoxIcon.Error)
@@ -3674,7 +3708,7 @@ Public MustInherit Class BaseChatControl
     End Function
 
     Private Function CreateRequestBody(uuid As String, question As String, systemPrompt As String, addHistory As Boolean) As String
-        Dim result As String = StripQuestion(question)
+        Dim result As String = question
 
         ' 构建 messages 数组
         Dim messagesArray As JArray = Nothing
@@ -3700,10 +3734,10 @@ Public MustInherit Class BaseChatControl
                     End If
                 End If
                 Dim enableMem = MemoryConfig.EnableUserProfile OrElse MemoryConfig.RagTopN > 0
-                
+
                 Debug.WriteLine($"[CreateRequestBody] 尝试使用 ContextBuilder，UseContextBuilder={MemoryConfig.UseContextBuilder}, enableMem={enableMem}")
                 Debug.WriteLine($"[CreateRequestBody] 当前会话消息数: {sessionMsgs.Count}")
-                
+
                 Dim built = ChatContextBuilder.BuildMessages(scenario, appType, result, sessionMsgs, result, systemPrompt, vars, enableMem)
                 messagesArray = New JArray()
                 For Each msg In built
@@ -3713,7 +3747,7 @@ Public MustInherit Class BaseChatControl
                     messagesArray.Add(msgObj)
                 Next
                 usedContextBuilder = True
-                
+
                 Debug.WriteLine($"[CreateRequestBody] ContextBuilder 构建成功，消息数: {messagesArray.Count}")
 
                 ' 更新本地 systemHistoryMessageData 与持久化
@@ -3995,64 +4029,64 @@ Public MustInherit Class BaseChatControl
                 Dim aiName As String = ConfigSettings.platform & " " & ConfigSettings.ModelName
 
                 Using response As HttpResponseMessage = Await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead)
-                        response.EnsureSuccessStatusCode()
-                        Debug.WriteLine($"[HTTP] 响应状态码: {response.StatusCode}")
+                    response.EnsureSuccessStatusCode()
+                    Debug.WriteLine($"[HTTP] 响应状态码: {response.StatusCode}")
 
-                        ' 创建前端聊天节（使用 uuid 作为显示 id）
-                        Dim jsCreate As String = $"createChatSection('{aiName}', formatDateTime(new Date()), '{uuid}');"
-                        Await ExecuteJavaScriptAndWaitAsync(jsCreate)
+                    ' 创建前端聊天节（使用 uuid 作为显示 id）
+                    Dim jsCreate As String = $"createChatSection('{aiName}', formatDateTime(new Date()), '{uuid}');"
+                    Await ExecuteJavaScriptAndWaitAsync(jsCreate)
 
-                        ' 等待确认 rendererMap 已创建
-                        Await WaitForRendererMapAsync(uuid)
+                    ' 等待确认 rendererMap 已创建
+                    Await WaitForRendererMapAsync(uuid)
 
-                        ' 在前端 DOM 的 chat 节上设置 dataset.requestId，以便前端后续执行时可以把 requestUuid 发回
-                        Dim jsSetMapping As String = $"(function(){{ var el = document.getElementById('chat-{uuid}'); if(el) el.dataset.requestId = '{requestUuid}'; }})();"
-                        Await ExecuteJavaScriptAndWaitAsync(jsSetMapping)
+                    ' 在前端 DOM 的 chat 节上设置 dataset.requestId，以便前端后续执行时可以把 requestUuid 发回
+                    Dim jsSetMapping As String = $"(function(){{ var el = document.getElementById('chat-{uuid}'); if(el) el.dataset.requestId = '{requestUuid}'; }})();"
+                    Await ExecuteJavaScriptAndWaitAsync(jsSetMapping)
 
-                        ' 处理流（后续逻辑不变，但使用 responseUuid 进行 flush 等操作）
-                        Dim stringBuilder As New StringBuilder()
-                        Using responseStream As Stream = Await response.Content.ReadAsStreamAsync()
-                            Using reader As New StreamReader(responseStream, Encoding.UTF8)
-                                Dim buffer(102300) As Char
-                                Dim readCount As Integer
-                                Dim chunkCount As Integer = 0
-                                Do
-                                    If stopReaderStream Then
-                                        Debug.WriteLine("[Stream] 用户手动停止流读取")
-                                        _currentMarkdownBuffer.Clear()
-                                        allMarkdownBuffer.Clear()
-                                        Exit Do
-                                    End If
-                                    readCount = Await reader.ReadAsync(buffer, 0, buffer.Length)
-                                    If readCount = 0 Then Exit Do
-                                    chunkCount += 1
-                                    Dim chunk As String = New String(buffer, 0, readCount)
-                                    chunk = chunk.Replace("data:", "")
-                                    stringBuilder.Append(chunk)
+                    ' 处理流（后续逻辑不变，但使用 responseUuid 进行 flush 等操作）
+                    Dim stringBuilder As New StringBuilder()
+                    Using responseStream As Stream = Await response.Content.ReadAsStreamAsync()
+                        Using reader As New StreamReader(responseStream, Encoding.UTF8)
+                            Dim buffer(102300) As Char
+                            Dim readCount As Integer
+                            Dim chunkCount As Integer = 0
+                            Do
+                                If stopReaderStream Then
+                                    Debug.WriteLine("[Stream] 用户手动停止流读取")
+                                    _currentMarkdownBuffer.Clear()
+                                    allMarkdownBuffer.Clear()
+                                    Exit Do
+                                End If
+                                readCount = Await reader.ReadAsync(buffer, 0, buffer.Length)
+                                If readCount = 0 Then Exit Do
+                                chunkCount += 1
+                                Dim chunk As String = New String(buffer, 0, readCount)
+                                chunk = chunk.Replace("data:", "")
+                                stringBuilder.Append(chunk)
 
-                                    ' 调试：记录每次读取的数据
-                                    If chunkCount <= 3 Then
-                                        Debug.WriteLine($"[Stream] chunk#{chunkCount} 长度={readCount}, 内容前100字符: {chunk.Substring(0, Math.Min(100, chunk.Length))}")
-                                    End If
-
-                                    If stringBuilder.ToString().TrimEnd({ControlChars.Cr, ControlChars.Lf, " "c}).EndsWith("}") Then
-                                        ProcessStreamChunk(stringBuilder.ToString().TrimEnd({ControlChars.Cr, ControlChars.Lf, " "c}), responseUuid, originQuestion)
-                                        stringBuilder.Clear()
-                                    End If
-                                Loop
-
-                                ' 调试：如果循环结束但stringBuilder不为空，说明有未处理的数据
-                                If stringBuilder.Length > 0 Then
-                                    Debug.WriteLine($"[Stream] 警告：循环结束但stringBuilder还有未处理数据，长度={stringBuilder.Length}")
-                                    Debug.WriteLine($"[Stream] 未处理数据内容: {stringBuilder.ToString().Substring(0, Math.Min(200, stringBuilder.Length))}")
-                                    ' 尝试处理剩余数据
-                                    ProcessStreamChunk(stringBuilder.ToString().Trim(), responseUuid, originQuestion)
+                                ' 调试：记录每次读取的数据
+                                If chunkCount <= 3 Then
+                                    Debug.WriteLine($"[Stream] chunk#{chunkCount} 长度={readCount}, 原始内容: {chunk}")
                                 End If
 
-                                Debug.WriteLine($"[Stream] 流接收完成，共处理了 {chunkCount} 个chunk")
-                            End Using
+                                If stringBuilder.ToString().TrimEnd({ControlChars.Cr, ControlChars.Lf, " "c}).EndsWith("}") Then
+                                    ProcessStreamChunk(stringBuilder.ToString().TrimEnd({ControlChars.Cr, ControlChars.Lf, " "c}), responseUuid, originQuestion)
+                                    stringBuilder.Clear()
+                                End If
+                            Loop
+
+                            ' 调试：如果循环结束但stringBuilder不为空，说明有未处理的数据
+                            If stringBuilder.Length > 0 Then
+                                Debug.WriteLine($"[Stream] 警告：循环结束但stringBuilder还有未处理数据，长度={stringBuilder.Length}")
+                                Debug.WriteLine($"[Stream] 未处理数据内容: {stringBuilder.ToString().Substring(0, Math.Min(200, stringBuilder.Length))}")
+                                ' 尝试处理剩余数据
+                                ProcessStreamChunk(stringBuilder.ToString().Trim(), responseUuid, originQuestion)
+                            End If
+
+                            Debug.WriteLine($"[Stream] 流接收完成，共处理了 {chunkCount} 个chunk")
                         End Using
                     End Using
+                End Using
             End Using
         Catch ex As Exception
             Debug.WriteLine($"[ERROR] 请求过程中出错: {ex.ToString()}")
@@ -4081,8 +4115,8 @@ Public MustInherit Class BaseChatControl
                 ManageHistoryMessageSize()
                 _chatStateService.AddMessage("assistant", answer.content)
 
-                ' 异步保存原子记忆（fire-and-forget），带上当前宿主便于按应用筛选
-                MemoryService.SaveAtomicMemoryAsync(originQuestion, answer.content, _chatStateService.CurrentSessionId, GetOfficeAppType())
+                ' 异步保存对话双方记忆（user 用实际发送内容，assistant 用完整回复）
+                MemoryService.SaveConversationTurnAsync(originQuestion, answer.content, _chatStateService.CurrentSessionId, GetOfficeAppType())
 
                 ' 新会话首条回复后写入 session_summary（Task 9.2）
                 If systemHistoryMessageData.Count = 3 Then
@@ -4182,7 +4216,7 @@ Public MustInherit Class BaseChatControl
                 If line = "" Then
                     Continue For
                 End If
-
+                'Debug.Print(line)
                 Dim jsonObj As JObject = JObject.Parse(line)
 
                 ' 获取token信息 - 只保存最后一个响应块的usage信息
@@ -4202,6 +4236,7 @@ Public MustInherit Class BaseChatControl
                 End If
 
                 Dim content As String = jsonObj("choices")(0)("delta")("content")?.ToString()
+                'Debug.Print(content)
                 If Not String.IsNullOrEmpty(content) Then
                     'Debug.WriteLine($"[ProcessStreamChunk] 解析到content: {content.Substring(0, Math.Min(50, content.Length))}...")
                     _currentMarkdownBuffer.Append(content)

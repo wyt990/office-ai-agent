@@ -507,9 +507,25 @@ Public Class IntentRecognitionService
                 userMessage &= vbCrLf & vbCrLf & "当前Office上下文信息:" & vbCrLf & contextInfo
             End If
 
-            ' 构建请求体
+            ' 构建请求体 - 包含历史对话（作为正确的 role 消息）
             Dim messages As New JArray()
             messages.Add(New JObject From {{"role", "system"}, {"content", systemPrompt}})
+
+            ' 将历史对话作为 user/assistant 消息注入，让大模型理解上下文后再做意图识别
+            If context IsNot Nothing AndAlso context("conversationHistory") IsNot Nothing Then
+                Dim historyArr = TryCast(context("conversationHistory"), JArray)
+                If historyArr IsNot Nothing AndAlso historyArr.Count > 0 Then
+                    For Each hMsg In historyArr
+                        Dim hRole = hMsg("role")?.ToString()
+                        Dim hContent = hMsg("content")?.ToString()
+                        If Not String.IsNullOrEmpty(hRole) AndAlso Not String.IsNullOrEmpty(hContent) Then
+                            messages.Add(New JObject From {{"role", hRole}, {"content", hContent}})
+                        End If
+                    Next
+                    Debug.WriteLine($"[IntentRecognition] 注入 {historyArr.Count} 条历史消息用于意图识别")
+                End If
+            End If
+
             messages.Add(New JObject From {{"role", "user"}, {"content", userMessage}})
 
             Dim requestBody As New JObject()

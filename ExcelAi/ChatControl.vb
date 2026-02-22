@@ -630,7 +630,7 @@ Public Class ChatControl
             If Not ExcelJsonCommandSchema.ValidateJsonStructure(processedJson, errorMessage, normalizedJson) Then
                 ' 格式验证失败，显示详细错误
                 Debug.WriteLine($"JSON格式验证失败: {errorMessage}")
-                Debug.WriteLine($"原始JSON: {processedJson.Substring(0, Math.Min(200, processedJson.Length))}...")
+                Debug.WriteLine($"原始JSON: {processedJson}")
 
                 ShareRibbon.GlobalStatusStrip.ShowWarning($"JSON格式不符合规范: {errorMessage}")
 

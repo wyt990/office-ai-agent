@@ -1,4 +1,4 @@
-﻿' ShareRibbon\Controls\Services\MemoryService.vb
+' ShareRibbon\Controls\Services\MemoryService.vb
 ' 记忆服务：封装 RAG、用户画像、会话摘要、异步写入
 
 Imports System.Threading.Tasks
@@ -11,15 +11,13 @@ Public Class MemoryService
     ''' <summary>
     ''' 被动 RAG：按 query 检索 top-N 条相关原子记忆（使用向量相似度）
     ''' </summary>
-    Public Shared Function GetRelevantMemories(query As String, Optional topN As Integer? = Nothing, Optional startTime As DateTime? = Nothing, Optional endTime As DateTime? = Nothing) As List(Of AtomicMemoryRecord)
+    Public Shared Function GetRelevantMemories(query As String, Optional topN As Integer? = Nothing, Optional startTime As DateTime? = Nothing, Optional endTime As DateTime? = Nothing, Optional appType As String = Nothing) As List(Of AtomicMemoryRecord)
         Dim n = If(topN.HasValue, topN.Value, MemoryConfig.RagTopN)
         
-        ' 首先尝试生成查询向量（同步等待，为了兼容现有调用）
         Dim queryEmbedding As Single() = Nothing
         Try
-            If Not String.IsNullOrWhiteSpace(query) Then
+            If Not String.IsNullOrWhiteSpace(query) AndAlso EmbeddingService.IsEmbeddingAvailable() Then
                 Debug.WriteLine($"[MemoryService] 正在生成查询向量...")
-                ' 使用同步等待的方式调用异步方法（这不是最佳实践，但为了兼容性）
                 Dim task = EmbeddingService.GetEmbeddingAsync(query)
                 task.Wait(TimeSpan.FromSeconds(10))
                 If task.IsCompleted Then
@@ -30,13 +28,14 @@ Public Class MemoryService
                 Else
                     Debug.WriteLine($"[MemoryService] 查询向量生成超时或失败")
                 End If
+            ElseIf Not EmbeddingService.IsEmbeddingAvailable() Then
+                Debug.WriteLine($"[MemoryService] Embedding 不可用，直接使用关键词检索")
             End If
         Catch ex As Exception
             Debug.WriteLine($"[MemoryService] 生成查询向量失败: {ex.Message}")
         End Try
         
-        ' 调用 Repository 进行检索（会自动判断是否有向量）
-        Return MemoryRepository.GetRelevantMemories(query, n, queryEmbedding, startTime, endTime)
+        Return MemoryRepository.GetRelevantMemories(query, n, queryEmbedding, startTime, endTime, appType)
     End Function
 
     ''' <summary>
@@ -141,7 +140,7 @@ Public Class MemoryService
     ''' <summary>
     ''' 主动 RAG 工具：按 keyword 和可选时间范围检索
     ''' </summary>
-    Public Shared Function SearchMemories(keyword As String, Optional startTime As DateTime? = Nothing, Optional endTime As DateTime? = Nothing) As List(Of AtomicMemoryRecord)
+    Public Shared Function SearchMemories(keyword As String, Optional startTime As DateTime? = Nothing, Optional endTime As DateTime? = Nothing, Optional appType As String = Nothing) As List(Of AtomicMemoryRecord)
         Dim queryEmbedding As Single() = Nothing
         Try
             If Not String.IsNullOrWhiteSpace(keyword) Then
@@ -155,7 +154,70 @@ Public Class MemoryService
             Debug.WriteLine($"[MemoryService] SearchMemories 生成向量失败: {ex.Message}")
         End Try
         
-        Return MemoryRepository.GetRelevantMemories(keyword, MemoryConfig.RagTopN, queryEmbedding, startTime, endTime)
+        Return MemoryRepository.GetRelevantMemories(keyword, MemoryConfig.RagTopN, queryEmbedding, startTime, endTime, appType)
+    End Function
+
+    ''' <summary>
+    ''' 保存一轮对话（user + assistant）为两条独立的原子记忆，含 embedding 和改进的去重。
+    ''' </summary>
+    Public Shared Sub SaveConversationTurnAsync(userContent As String, assistantContent As String, sessionId As String, Optional appType As String = Nothing)
+        Task.Run(Async Function()
+                     Try
+                         Dim maxLen = MemoryConfig.AtomicContentMaxLength
+
+                         ' 保存 user 消息
+                         If Not String.IsNullOrWhiteSpace(userContent) Then
+                             Dim uTrimmed = userContent.Trim()
+                             Dim uStore = If(uTrimmed.Length > maxLen, uTrimmed.Substring(0, maxLen), uTrimmed)
+                             If uStore.Length >= 10 AndAlso Not IsDuplicate(sessionId, uStore) Then
+                                 Dim embJson = Await GenerateEmbeddingJson(uStore)
+                                 MemoryRepository.InsertAtomicMemory(uStore, Nothing, sessionId, appType, embJson, "short_term")
+                                 Debug.WriteLine($"[MemoryService] 保存 user 记忆，长度: {uStore.Length}, 有向量: {Not String.IsNullOrWhiteSpace(embJson)}")
+                             End If
+                         End If
+
+                         ' 保存 assistant 回复
+                         If Not String.IsNullOrWhiteSpace(assistantContent) Then
+                             Dim aTrimmed = assistantContent.Trim()
+                             Dim aStore = If(aTrimmed.Length > maxLen, aTrimmed.Substring(0, maxLen), aTrimmed)
+                             If aStore.Length >= 10 AndAlso Not IsDuplicate(sessionId, aStore) Then
+                                 Dim embJson = Await GenerateEmbeddingJson(aStore)
+                                 MemoryRepository.InsertAtomicMemory(aStore, Nothing, sessionId, appType, embJson, "short_term")
+                                 Debug.WriteLine($"[MemoryService] 保存 assistant 记忆，长度: {aStore.Length}, 有向量: {Not String.IsNullOrWhiteSpace(embJson)}")
+                             End If
+                         End If
+                     Catch ex As Exception
+                         Debug.WriteLine($"SaveConversationTurnAsync 失败: {ex.Message}")
+                     End Try
+                 End Function)
+    End Sub
+
+    Private Shared Function IsDuplicate(sessionId As String, content As String) As Boolean
+        Try
+            Dim prefix = If(content.Length > 50, content.Substring(0, 50), content)
+            Dim existing = MemoryRepository.GetRelevantMemories(prefix, 3)
+            For Each ex In existing
+                If ex.SessionId = sessionId AndAlso Not String.IsNullOrWhiteSpace(ex.Content) Then
+                    Dim exPrefix = If(ex.Content.Length > 50, ex.Content.Substring(0, 50), ex.Content)
+                    If exPrefix = prefix Then Return True
+                End If
+            Next
+        Catch
+        End Try
+        Return False
+    End Function
+
+    Private Shared Async Function GenerateEmbeddingJson(text As String) As Task(Of String)
+        Try
+            If Not EmbeddingService.IsEmbeddingAvailable() Then Return Nothing
+            Dim embedding = Await EmbeddingService.GetEmbeddingAsync(text)
+            If embedding IsNot Nothing Then
+                Return EmbeddingService.SerializeVector(embedding)
+            End If
+        Catch ex As Exception
+            Debug.WriteLine($"[MemoryService] 生成记忆向量失败: {ex.Message}")
+        End Try
+        Return Nothing
     End Function
 
     ''' <summary>
